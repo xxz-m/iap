@@ -1,0 +1,26 @@
+--cpu=Cortex-M4.fp.sp
+"iap_bootloadr\startup_stm32f407xx.o"
+"iap_bootloadr\main.o"
+"iap_bootloadr\gpio.o"
+"iap_bootloadr\usart.o"
+"iap_bootloadr\stm32f4xx_it.o"
+"iap_bootloadr\stm32f4xx_hal_msp.o"
+"iap_bootloadr\stm32f4xx_hal_uart.o"
+"iap_bootloadr\stm32f4xx_hal_rcc.o"
+"iap_bootloadr\stm32f4xx_hal_rcc_ex.o"
+"iap_bootloadr\stm32f4xx_hal_flash.o"
+"iap_bootloadr\stm32f4xx_hal_flash_ex.o"
+"iap_bootloadr\stm32f4xx_hal_flash_ramfunc.o"
+"iap_bootloadr\stm32f4xx_hal_gpio.o"
+"iap_bootloadr\stm32f4xx_hal_dma_ex.o"
+"iap_bootloadr\stm32f4xx_hal_dma.o"
+"iap_bootloadr\stm32f4xx_hal_pwr.o"
+"iap_bootloadr\stm32f4xx_hal_pwr_ex.o"
+"iap_bootloadr\stm32f4xx_hal_cortex.o"
+"iap_bootloadr\stm32f4xx_hal.o"
+"iap_bootloadr\stm32f4xx_hal_exti.o"
+"iap_bootloadr\system_stm32f4xx.o"
+--library_type=microlib --strict --scatter "iap_bootloadr\iap_bootloadr.sct"
+--summary_stderr --info summarysizes --map --load_addr_map_info --xref --callgraph --symbols
+--info sizes --info totals --info unused --info veneers
+--list "iap_bootloadr.map" -o iap_bootloadr\iap_bootloadr.axf
