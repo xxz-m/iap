@@ -1,0 +1,22 @@
+# Keil / MDK build outputs
+*.o
+*.d
+*.crf
+*.lst
+*.map
+*.axf
+*.hex
+*.bin
+*.build_log.htm
+*.htm
+*.lnp
+*.dep
+
+# Keil user-local files
+*.uvguix.*
+
+# Temporary / backup files
+*.bak
+*.tmp
+*.log
+
