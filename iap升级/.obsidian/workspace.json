@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "git管理笔记.md",
+                "file": "iap升级.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "git管理笔记"
+              "title": "iap升级"
             }
           }
         ]
@@ -80,13 +80,13 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "git管理笔记.md",
+                "file": "iap升级.md",
                 "followCursor": false,
                 "showSearch": false,
                 "searchQuery": ""
               },
               "icon": "lucide-list",
-              "title": "git管理笔记 的大纲"
+              "title": "iap升级 的大纲"
             }
           }
         ],
@@ -186,8 +186,8 @@
   },
   "active": "68468da278dce625",
   "lastOpenFiles": [
-    "iap升级.md",
     "git管理笔记.md",
+    "iap升级.md",
     "欢迎.md"
   ]
 }

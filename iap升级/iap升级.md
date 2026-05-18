@@ -815,195 +815,320 @@ App 不在零地址，向量表也要偏移；
 最后跳 Reset_Handler，不是跳 main。
 ```
 
-## 3. 推荐学习路线
+## 3. 从 mini IAP 到 mOTA 的实战路线
 
-### 第一阶段：先跑通 Bootloader 跳转 App
+当前学习路线调整为：先自己写一个最小可用的 mini IAP，再带着问题去看 mOTA。这样不是一开始就啃大神工程，而是先把核心链路在自己手里跑通。
 
-目标：先不做升级，只做“双工程启动”。
-
-需要掌握：
-
-- STM32 启动流程：上电后从向量表读取 MSP 和 Reset_Handler。
-- Bootloader 工程与 App 工程的地址划分。
-- App 工程的 Flash 起始地址修改。
-- App 工程向量表偏移配置。
-- Bootloader 跳转 App 前的中断、栈指针、时钟和外设处理。
-
-建议实验：
-
-1. 建立 `Bootloader` 工程，放在 `0x08000000`。
-2. 建立 `App` 工程，放在 `0x08020000`。
-3. App 中只做 LED 闪烁或串口打印。
-4. Bootloader 延时 1 秒后跳转 App。
-5. 验证 App 是否能稳定运行。
-
-验收标准：
-
-- 复位后先进入 Bootloader，再进入 App。
-- App 的中断可以正常响应。
-- App 中的 SysTick、串口、定时器不会异常。
-
-### 第二阶段：理解 STM32F407 Flash 分区
-
-目标：知道固件应该写到哪里，以及哪些区域绝对不能擦。
-
-STM32F407 常见 Flash 起始地址为：
+总路线：
 
 ```text
-0x08000000
+1. 自己写一个能跳转 APP 的 Bootloader
+2. 自己写一个串口升级 APP 的 mini IAP
+3. 自己加 CRC
+4. 看 mOTA 的分区设计
+5. 看 mOTA 的固件包格式
+6. 看 mOTA 的断电保护
+7. 看 mOTA 的代码分层
+8. 把自己的 mini 版重构成更工程化的版本
 ```
 
-以常见 1MB Flash 型号为例，扇区大致如下：
-
-| 扇区 | 地址范围 | 大小 | 建议用途 |
-|---|---:|---:|---|
-| Sector 0 | `0x08000000 - 0x08003FFF` | 16KB | Bootloader |
-| Sector 1 | `0x08004000 - 0x08007FFF` | 16KB | Bootloader |
-| Sector 2 | `0x08008000 - 0x0800BFFF` | 16KB | Bootloader 参数 |
-| Sector 3 | `0x0800C000 - 0x0800FFFF` | 16KB | 备份参数或升级标志 |
-| Sector 4 | `0x08010000 - 0x0801FFFF` | 64KB | Bootloader 扩展 |
-| Sector 5 | `0x08020000 - 0x0803FFFF` | 128KB | App 起始区 |
-| Sector 6-11 | `0x08040000 - 0x080FFFFF` | 128KB/扇区 | App 主体 |
-
-推荐初学分区：
+一句话记忆：
 
 ```text
-Bootloader: 0x08000000 - 0x0801FFFF   128KB
-App:        0x08020000 - 0x080FFFFF   896KB
+先自己做小闭环，再看成熟工程为什么那样设计。
 ```
 
-这样做的好处：
+### 第一步：自己写最小 Bootloader
 
-- App 从 Sector 5 开始，扇区边界清晰。
-- Bootloader 空间足够放串口、升级协议、CRC、菜单逻辑。
-- 擦除 App 区时不容易误擦 Bootloader。
+目标：只搞懂 Bootloader 怎么启动、怎么判断 App、怎么跳转 App。
 
-待确认：
+只实现这几个功能：
 
-- 你的具体芯片型号是否为 1MB Flash。
-- 工程使用 HAL、标准库还是裸寄存器。
-- 当前下载器和 Keil/IAR/STM32CubeIDE 的 Flash 配置是否匹配。
+1. 上电进入 Bootloader。
+2. 判断 APP 地址有没有有效程序。
+3. 有 APP 就跳转。
+4. 没 APP 就停在 Bootloader。
 
-### 第三阶段：掌握 Flash 擦写
+暂时不做：
 
-目标：能在 Bootloader 中擦除 App 区并写入一段测试数据。
+- OTA。
+- 串口接收 bin。
+- Flash 写入。
+- CRC。
+- 固件包。
+- 断电保护。
 
-重点知识：
+核心知识点：
 
-- 写 Flash 前必须解锁。
-- 写入前必须擦除对应扇区。
-- Flash 只能从 `1` 写成 `0`，不能直接从 `0` 写回 `1`。
-- 擦除单位是扇区，写入单位由 HAL 配置决定，常见为 byte、half-word、word、double-word。
-- 擦写期间不能从同一 Flash Bank 正常取指执行复杂逻辑，必须关注中断和时序。
-
-建议实验：
-
-1. 在 Bootloader 中擦除 App 区第一个扇区。
-2. 写入若干固定数据。
-3. 复位后读取并打印数据。
-4. 故意写入未擦除地址，观察错误返回值。
-
-验收标准：
-
-- 能明确知道擦除了哪些扇区。
-- 写入后读取值与原始数据一致。
-- 写入失败时有错误处理和日志输出。
-
-### 第四阶段：接入串口升级协议
-
-目标：通过串口把 `.bin` 固件发送给 Bootloader。
-
-推荐先从简单协议开始，不急着上 YModem：
-
-```text
-帧头 + 命令 + 序号 + 长度 + 数据 + CRC
-```
-
-基础命令建议：
-
-| 命令 | 用途 |
+| 知识点 | 作用 |
 |---|---|
-| `START` | 通知 Bootloader 准备升级，包含固件大小和 CRC |
-| `DATA` | 发送固件分包 |
-| `END` | 通知发送完成 |
-| `ABORT` | 取消升级 |
-| `QUERY` | 查询版本号、升级状态、设备信息 |
+| MSP 主堆栈指针 | App 启动后使用自己的栈 |
+| Reset_Handler | App 真正的复位入口 |
+| `SCB->VTOR` | 切换到 App 的异常向量表 |
+| APP 起始地址 | Bootloader 从这里读取 App 向量表 |
+| 关闭中断 | 跳转时避免 Bootloader 中断干扰 App |
 
-建议实验：
-
-1. PC 端脚本发送一个小 `.bin` 文件。
-2. Bootloader 接收数据但先不写 Flash，只统计长度和 CRC。
-3. 确认接收无误后，再加入 Flash 写入。
-4. 每包数据写入后返回 ACK。
-5. 出错时返回 NACK，并支持重发。
-
-验收标准：
-
-- 串口丢包时不会继续盲写。
-- CRC 不一致时不会跳转新 App。
-- 固件大小超过 App 区时会拒绝升级。
-
-### 第五阶段：实现固件校验与启动决策
-
-目标：Bootloader 不只是“能写”，还要“会判断能不能启动”。
-
-启动前建议检查：
-
-1. App 栈顶地址是否合法。
-2. App Reset_Handler 地址是否合法。
-3. 固件长度是否合法。
-4. 固件 CRC 是否正确。
-5. 升级标志是否表示升级完成。
-
-App 地址合法性示例：
+本项目当前状态：
 
 ```text
-MSP 应落在 SRAM 范围，例如 0x20000000 - 0x2001FFFF
-Reset_Handler 应落在 App Flash 范围，例如 0x08020000 - 0x080FFFFF
+已完成。
+Bootloader: 0x08000000
+App:        0x08020000
 ```
 
-升级标志建议单独放在参数区，例如 Sector 3：
+已验证：
+
+- Bootloader 能启动。
+- Bootloader 能读取 App 的 MSP 和 Reset_Handler。
+- App 合法时能按键跳转。
+- App 跳转后 PF10 LED 能运行。
+
+这一关特别重要，因为 OTA 的根就在这里。后续无论固件怎么传、协议怎么封装、分区怎么设计，最终都要回到这一步：
 
 ```text
-upgrade_flag
-app_size
-app_crc32
-app_version
-upgrade_result
+校验 App -> 切 MSP -> 切 VTOR -> 跳 Reset_Handler
 ```
 
-验收标准：
+### 第二步：加串口接收 bin
 
-- 没有 App 时停留在 Bootloader。
-- App 损坏时停留在 Bootloader。
-- App 正常时自动跳转。
-- 升级中断电后不会启动半包固件。
+目标：做最笨但能跑通的串口升级。
 
-### 第六阶段：做升级可靠性增强
+最小流程：
 
-目标：让 IAP 从“实验能跑”变成“项目可用”。
+```text
+PC 上位机通过串口发 bin
+  ↓
+STM32 Bootloader 接收数据
+  ↓
+写入 APP 分区
+  ↓
+写完后跳转 APP
+```
 
-建议逐步加入：
+这一阶段先不急着用 YModem。先自己定义一个简单协议，理解“固件怎么被拆包、怎么被接收、怎么被写入”。
 
-- 固件版本号管理。
-- 固件长度校验。
-- CRC32 校验。
-- 升级超时退出。
-- 升级失败重试。
-- App 主动请求进入 Bootloader。
-- 看门狗喂狗策略。
-- Bootloader 日志输出。
-- 固件头部信息结构体。
-- 参数区双备份。
+建议协议：
 
-更高级的方向：
+```text
+AA 55 + CMD + LEN + DATA + CRC
+```
 
-- A/B 双分区升级。
-- 差分升级。
-- 加密固件。
-- 签名校验。
-- 防回滚版本策略。
-- 断点续传。
+字段含义：
+
+| 字段 | 作用 |
+|---|---|
+| `AA 55` | 帧头，用来找一包数据的开始 |
+| `CMD` | 命令，例如开始、数据、结束 |
+| `LEN` | 本包数据长度 |
+| `DATA` | 固件数据或命令参数 |
+| `CRC` | 本包校验，先可用简单校验，后续换 CRC32 |
+
+建议先拆成三个小实验：
+
+1. 串口收到 1 个字节并打印。
+2. 串口收到一包固定长度数据并打印长度。
+3. 串口按协议解析 `AA 55 + CMD + LEN + DATA + CRC`。
+
+再进入真正写 Flash：
+
+```text
+START：接收固件总长度
+DATA：分包接收并写入 App 区
+END：结束接收并尝试跳转
+```
+
+### 第三步：加 CRC 校验
+
+目标：让 mini IAP 从“能用”变成“稍微靠谱”。
+
+最小校验流程：
+
+```text
+接收固件
+  ↓
+计算 CRC
+  ↓
+和上位机发来的 CRC 对比
+  ↓
+正确才写入 / 跳转
+```
+
+这里有两种做法：
+
+| 做法 | 特点 |
+|---|---|
+| 接收时边收边写，最后对 Flash 计算 CRC | 更接近真实升级 |
+| 先接收到缓冲区或外部 Flash，校验后再写 | 更安全，但需要额外空间 |
+
+初学阶段可以先做：
+
+```text
+接收一包 -> 写一包 -> 最后对 App 区整体算 CRC
+```
+
+需要特别注意：
+
+- 上位机和 Bootloader 的 CRC 算法必须一致。
+- CRC 计算范围必须一致。
+- 固件长度必须参与边界检查。
+- CRC 失败不能跳转 App。
+
+### 第四步：开始看 mOTA 的分区设计
+
+完成 mini IAP 后再看 mOTA，重点看它怎么分区。
+
+带着这些问题看：
+
+```text
+我现在只有 Bootloader + 单 App，mOTA 为什么要做多分区？
+我现在 App 地址写死，mOTA 怎么配置不同分区？
+我现在直接擦写 App 区，mOTA 怎么避免误擦？
+```
+
+重点关注：
+
+- Bootloader 区。
+- App 运行区。
+- 下载区。
+- 参数区。
+- 备份区。
+- A/B 或多分区切换策略。
+
+### 第五步：看 mOTA 的固件包格式
+
+完成裸 `bin` 升级后，再看 mOTA 为什么不只传裸 bin。
+
+带着这些问题看：
+
+```text
+我现在只是裸 bin，它为什么要做 fpk 固件包？
+固件包里除了程序数据，还放了什么？
+固件长度、版本号、目标地址、CRC 放在哪里？
+```
+
+裸 bin 的问题：
+
+- 不知道目标硬件型号。
+- 不知道版本号。
+- 不知道固件长度。
+- 不知道目标地址。
+- 不方便做签名、加密、防回滚。
+
+固件包通常会包含：
+
+```text
+固件头 + 固件数据 + CRC/签名
+```
+
+固件头常见字段：
+
+- magic 标志。
+- 固件大小。
+- 固件版本。
+- 目标芯片或硬件型号。
+- 目标写入地址。
+- CRC32。
+- 包格式版本。
+- 加密或签名标志。
+
+### 第六步：看 mOTA 的断电保护
+
+完成 mini IAP 后会发现一个问题：
+
+```text
+如果升级时断电，App 可能被写坏。
+```
+
+这时候再看 mOTA 的断电保护，理解会快很多。
+
+带着这些问题看：
+
+```text
+我现在升级中断电会变砖，它怎么做断电保护？
+它怎么知道上次升级进行到哪一步？
+它怎么判断该继续安装、回滚，还是停在 Bootloader？
+```
+
+重点关注状态机：
+
+```text
+IDLE
+DOWNLOADING
+DOWNLOAD_OK
+INSTALLING
+INSTALL_OK
+INSTALL_FAIL
+APP_CONFIRMED
+```
+
+关键原则：
+
+- 不能只靠“某个区域有数据”判断固件可用。
+- 必须有状态标志。
+- 必须有 CRC 或签名。
+- 安装过程中断电后，Bootloader 必须知道下一步该做什么。
+
+### 第七步：看 mOTA 的代码分层
+
+完成 mini 版后，再看它为什么要分层。
+
+带着这些问题看：
+
+```text
+我现在直接调用 HAL_FLASH，它为什么封装 bsp_flash？
+我现在协议、Flash、跳转都写在 main.c，它为什么拆成多个模块？
+我现在只支持串口，它怎么扩展到别的通信方式？
+```
+
+建议观察这些层：
+
+| 层 | 作用 |
+|---|---|
+| `bsp_flash` | 屏蔽不同芯片 Flash 擦写差异 |
+| `bsp_uart` / `bsp_can` | 屏蔽通信外设差异 |
+| protocol | 处理升级协议 |
+| package | 解析固件包 |
+| boot | 启动判断与跳转 |
+| app_manage | 分区、版本、状态管理 |
+
+这一步的目标不是照抄，而是理解工程化代码为什么要这样拆。
+
+### 第八步：把 mini 版重构成工程化版本
+
+当 mini IAP 跑通，并且看懂 mOTA 的设计后，再回头重构自己的版本。
+
+重构方向：
+
+- 把 Flash 操作从 `main.c` 拆到 `boot_flash.c`。
+- 把跳转逻辑拆到 `boot_jump.c`。
+- 把串口协议拆到 `boot_protocol.c`。
+- 把 CRC 拆到 `boot_crc.c`。
+- 把升级状态拆到 `boot_param.c`。
+- 把地址和分区集中到 `boot_config.h`。
+
+目标结构：
+
+```text
+Bootloader/
+  App/
+    boot_config.h
+    boot_jump.c
+    boot_jump.h
+    boot_flash.c
+    boot_flash.h
+    boot_protocol.c
+    boot_protocol.h
+    boot_crc.c
+    boot_crc.h
+    boot_param.c
+    boot_param.h
+```
+
+最终目标不是一开始就写得复杂，而是：
+
+```text
+先写得出来，再写得可靠，最后写得漂亮。
+```
 
 ## 4. 推荐工程结构
 
@@ -1223,35 +1348,66 @@ typedef struct
 
 ## 11. 推荐学习顺序
 
-第一周：
+当前学习顺序以“先自己跑通 mini IAP，再看 mOTA”为主线。
 
-- 学 STM32F407 启动流程。
-- 学 Flash 扇区分布。
-- 完成 Bootloader 跳转 App。
+第一阶段：最小 Bootloader
 
-第二周：
+- 目标：上电进入 Bootloader，判断 App，跳转 App。
+- 状态：已完成。
+- 关键知识：MSP、Reset_Handler、`SCB->VTOR`、App 起始地址、关闭/恢复中断。
+- 验收：App 放在 `0x08020000`，Bootloader 能按键跳转，App LED 正常翻转。
 
-- 学 Flash 擦写 API。
-- 完成 App 区擦除和固定数据写入。
-- 建立升级参数区。
+第二阶段：最小串口接收
 
-第三周：
+- 目标：先不写 Flash，只让 Bootloader 能收到 PC 发来的串口数据。
+- 实验 1：USART2 收 1 个字节，USART1 打印。
+- 实验 2：USART2 收固定长度数据，打印长度和内容。
+- 实验 3：解析简单帧头 `AA 55 + CMD + LEN + DATA + CRC`。
+- 验收：能稳定接收数据包，能识别帧头、命令和长度。
 
-- 设计最小串口协议。
-- 完成 PC 端发送工具。
-- Bootloader 接收固件并写入 Flash。
+第三阶段：串口写入 App 分区
 
-第四周：
+- 目标：通过串口接收 `app.bin` 并写入 App 区。
+- 先做最笨版本：不做复杂协议，只保证能按顺序写入。
+- 再加入 `START / DATA / END` 三类命令。
+- 验收：接收完成后，Bootloader 能跳转到新 App。
 
-- 加入 CRC32。
-- 加入升级标志。
-- 测试断电、丢包、重复升级、错误固件。
+第四阶段：加入 CRC
 
-第五周以后：
+- 目标：让 mini IAP 从“能跑”变成“稍微靠谱”。
+- 上位机发送固件长度和 CRC。
+- Bootloader 接收后计算 CRC。
+- CRC 正确才允许跳转。
+- CRC 错误则停留 Bootloader。
+- 验收：错误固件不会被启动。
 
-- 改造成 YModem 或自定义稳定协议。
-- 抽象升级通道，支持 CAN、以太网、4G 或 ESP32。
-- 加入固件头、签名、防回滚等安全能力。
+第五阶段：回头看 mOTA 分区设计
+
+- 目标：理解成熟工程为什么要分区。
+- 重点看 Bootloader 区、App 区、下载区、参数区、备份区。
+- 对比自己的 mini IAP：为什么单 App 简单但不够安全。
+- 验收：能画出 mOTA 的分区图，并说明每个区的作用。
+
+第六阶段：看 mOTA 固件包格式
+
+- 目标：理解为什么不用裸 bin，而要做 fpk 或类似固件包。
+- 重点看固件头字段：magic、version、size、target、CRC、签名。
+- 对比自己的 mini IAP：裸 bin 缺少哪些信息。
+- 验收：能设计一个自己的 `firmware_header_t`。
+
+第七阶段：看 mOTA 断电保护
+
+- 目标：理解升级过程中断电后如何恢复。
+- 重点看升级状态机：`DOWNLOADING`、`DOWNLOAD_OK`、`INSTALLING`、`INSTALL_OK`、`APP_CONFIRMED`。
+- 对比自己的 mini IAP：什么时候会变砖，怎么避免。
+- 验收：能说明断电发生在下载中、写入中、首次启动失败时分别怎么处理。
+
+第八阶段：重构自己的 mini IAP
+
+- 目标：把能跑的实验代码改成更工程化的结构。
+- 拆分模块：`boot_jump`、`boot_flash`、`boot_protocol`、`boot_crc`、`boot_param`。
+- 把地址、扇区、状态集中到配置文件。
+- 验收：功能不变，但代码结构更清晰，后续能扩展外置 Flash、A/B 分区或 mOTA 思路。
 
 ## 12. 后续笔记增量记录模板
 
