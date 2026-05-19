@@ -43,6 +43,8 @@
 #define SRAM_START_ADDR      0x20000000U
 //SRAM 结束边界的下一个地址。
 #define SRAM_END_ADDR        0x20020000U
+#define IAP_FILE_SIZE        4300U
+#define IAP_PACKET_SIZE      256U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -66,6 +68,13 @@ void SystemClock_Config(void);
 /* USER CODE BEGIN 0 */
 static uint8_t boot_app_is_valid(uint32_t app_addr);
 static void boot_jump_to_app(uint32_t app_addr);
+static HAL_StatusTypeDef boot_erase_app_flash(uint32_t Sector, uint32_t NbSectors);
+static HAL_StatusTypeDef boot_write_app_flash(uint32_t addr, uint8_t *data, uint32_t len);
+static void boot_iap_receive_fixed_file(void);
+uint8_t uart2_rx_byte[1] = {0};
+static uint8_t iap_rx_buf[IAP_FILE_SIZE];
+static volatile uint8_t iap_update_request = 0;
+
 /* USER CODE END 0 */
 
 /**
@@ -108,7 +117,7 @@ int main(void)
 	} else {
 			printf("no valid app, stay in bootloader\r\n");
 	}
-
+	HAL_UART_Receive_IT(&huart1, uart2_rx_byte, 1);
   /* USER CODE END 2 */
 	
   /* Infinite loop */
@@ -116,6 +125,11 @@ int main(void)
   while (1)
   {
     /* USER CODE END WHILE */
+		if (iap_update_request) {
+			iap_update_request = 0;
+			boot_iap_receive_fixed_file();
+		}
+
 		if(HAL_GPIO_ReadPin(GPIOE, GPIO_PIN_3)==RESET)
 		{
 				HAL_Delay(100);
@@ -243,6 +257,116 @@ static void boot_jump_to_app(uint32_t app_addr)
     app_entry();
 }
 
+static HAL_StatusTypeDef boot_erase_app_flash(uint32_t Sector, uint32_t NbSectors)
+{
+	HAL_StatusTypeDef status;
+	FLASH_EraseInitTypeDef erase_init;
+	uint32_t sector_error = 0;
+
+	// APP 从 FLASH_SECTOR_5 开始，禁止擦除 bootloader 区域。
+	if (Sector < FLASH_SECTOR_5) {
+		return HAL_ERROR;
+	}
+
+	// 擦除或写入 Flash 前必须先解锁。
+	HAL_FLASH_Unlock();
+
+	// 内部 Flash 按扇区擦除。
+	erase_init.TypeErase = FLASH_TYPEERASE_SECTORS;
+	erase_init.Sector = Sector;
+	erase_init.NbSectors = NbSectors;
+	erase_init.VoltageRange = FLASH_VOLTAGE_RANGE_3;
+
+	status = HAL_FLASHEx_Erase(&erase_init, &sector_error);
+
+	// 操作结束后重新锁定 Flash。
+	HAL_FLASH_Lock();
+
+	return status;
+}
+static HAL_StatusTypeDef boot_write_app_flash(uint32_t addr, uint8_t *data, uint32_t len)
+{
+	HAL_StatusTypeDef status = HAL_OK;
+	uint32_t i = 0;
+	uint32_t word = 0;
+	// 判断addcr是不是在起始地址-终止地址之间
+	if (addr < APP_ADDR || addr >= FLASH_END_ADDR) {
+		return HAL_ERROR;
+	}
+	// 擦除或写入 Flash 前必须先解锁。
+	HAL_FLASH_Unlock();
+
+	while (i < len) {
+		word = 0xFFFFFFFF;
+
+		for (uint8_t j = 0; j < 4; j++) {
+			if ((i + j) < len) {
+				word &= ~((uint32_t)0xFF << (8 * j));
+				word |= ((uint32_t)data[i + j] << (8 * j));
+			}
+		}
+		 //往 STM32 内部 Flash写数据
+		status = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, addr + i, word);
+		if (status != HAL_OK) {
+			break;
+		}
+
+		i += 4;
+	}
+	//关闭锁
+	HAL_FLASH_Lock();
+
+	return status;
+}
+
+static void boot_iap_receive_fixed_file(void)
+{
+	HAL_UART_AbortReceive_IT(&huart1);
+	printf("iap start, erasing app flash\r\n");
+
+	if (boot_erase_app_flash(FLASH_SECTOR_5, 1) != HAL_OK) {
+		printf("erase failed\r\n");
+		HAL_UART_Receive_IT(&huart1, uart2_rx_byte, 1);
+		return;
+	}
+
+	printf("erase ok, file size: %lu, send bin file now\r\n", IAP_FILE_SIZE);
+
+	if (HAL_UART_Receive(&huart1, iap_rx_buf, IAP_FILE_SIZE, 30000) != HAL_OK) {
+		printf("receive timeout\r\n");
+		HAL_UART_Receive_IT(&huart1, uart2_rx_byte, 1);
+		return;
+	}
+
+	printf("receive ok, writing flash\r\n");
+
+	if (boot_write_app_flash(APP_ADDR, iap_rx_buf, IAP_FILE_SIZE) != HAL_OK) {
+		printf("write failed\r\n");
+		HAL_UART_Receive_IT(&huart1, uart2_rx_byte, 1);
+		return;
+	}
+
+	if (boot_app_is_valid(APP_ADDR)) {
+		printf("iap update ok\r\n");
+	} else {
+		printf("iap update invalid\r\n");
+	}
+
+	HAL_UART_Receive_IT(&huart1, uart2_rx_byte, 1);
+}
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+	if (huart->Instance == USART1) {
+		if (uart2_rx_byte[0] == 'U') {
+			iap_update_request = 1;
+			return;
+		}
+
+		HAL_UART_Transmit(&huart1, uart2_rx_byte, 1, 100);
+		HAL_UART_Receive_IT(&huart1, uart2_rx_byte, 1);
+	}
+}
+
 /* USER CODE END 4 */
 
 /**
@@ -275,3 +399,16 @@ void assert_failed(uint8_t *file, uint32_t line)
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
+
+
+
+
+
+
+
+
+
+
+
+
+
